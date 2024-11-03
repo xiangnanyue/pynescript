@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import itertools
 
+import numpy as np
+import pandas as pd
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -10,6 +13,7 @@ from typing import Generic
 from typing import TypeAlias
 from typing import TypeVar
 
+from operators import Operator
 from historical_data import hist
 from pandas import DataFrame
 
@@ -21,7 +25,7 @@ from pynescript.ast import parse
 T = TypeVar("T")
 
 
-class series(Generic[T]):
+class Series(Generic[T]):
     data: list[T] | T
 
     def __init__(self, data: Sequence[T] | None = None):
@@ -39,7 +43,7 @@ class series(Generic[T]):
         raise ValueError()
 
     def set(self, item):
-        if isinstance(item, series):
+        if isinstance(item, Series):
             item = item[0]
         self.data[-1] = item
 
@@ -50,7 +54,7 @@ class series(Generic[T]):
         self.data.extend(items)
 
 
-class simple(series[T]):
+class simple(Series[T]):
     def __init__(self, value: T | None = None):
         self.data = value
 
@@ -62,7 +66,7 @@ class simple(series[T]):
         raise ValueError()
 
     def set(self, item):
-        if isinstance(item, series):
+        if isinstance(item, Series):
             item = item[0]
         self.data = item
 
@@ -77,7 +81,7 @@ class const(simple[T]):
     pass
 
 
-class source(series[T]):
+class source(Series[T]):
     pass
 
 
@@ -114,9 +118,26 @@ display = plot_display
 
 
 class ta:
+
     @classmethod
-    def rsi(cls, source: series[int] | series[float], length: simple[int]) -> series[float]:
-        import pandas as pd
+    def sma(cls, source: Series[int] | Series[float], length: simple[int]) -> Series[float]:
+        import ta
+
+        source = source[:length[0]][::-1]  # 反转序列
+        source = pd.Series(source)
+        result = ta.trend.sma_indicator(source, length[0]).iloc[-1]
+        # result = source.rolling(window=length[0]).mean().iloc[-1]  # 计算均值
+        return [result]
+
+    @classmethod
+    def stdev(cls, source: Series[int] | Series[float], length: simple[int]) -> Series[float]:
+        source = source[: length[0]][::-1]
+        source = pd.Series(source)
+        result = source.rolling(window=length[0]).std().iloc[-1]  # 计算标准差
+        return [result]
+
+    @classmethod
+    def rsi(cls, source: Series[int] | Series[float], length: simple[int]) -> Series[float]:
         import ta
 
         source = source[: length[0]][::-1]
@@ -126,11 +147,11 @@ class ta:
         return [result]
 
     @classmethod
-    def crossover(cls, source1: series[int] | series[float], source2: series[int] | series[float]) -> series[bool]:
+    def crossover(cls, source1: Series[int] | Series[float], source2: Series[int] | Series[float]) -> Series[bool]:
         return [source1[0] > source2[0] and source1[1] <= source2[1]]
 
     @classmethod
-    def crossunder(cls, source1: series[int] | series[float], source2: series[int] | series[float]) -> series[bool]:
+    def crossunder(cls, source1: Series[int] | Series[float], source2: Series[int] | Series[float]) -> Series[bool]:
         return [source1[0] < source2[0] and source1[1] >= source2[1]]
 
 
@@ -193,24 +214,24 @@ class strategy:
 
     @dataclass
     class entry:
-        id: series[str]
-        direction: series[strategy_direction]
-        qty: series[int] | series[float] | None = None
-        limit: series[int] | series[float] | None = None
-        stop: series[int] | series[float] | None = None
-        oca_name: series[str] | None = None
+        id: Series[str]
+        direction: Series[strategy_direction]
+        qty: Series[int] | Series[float] | None = None
+        limit: Series[int] | Series[float] | None = None
+        stop: Series[int] | Series[float] | None = None
+        oca_name: Series[str] | None = None
         oca_type: input[str] | None = None
-        comment: series[str] | None = None
-        alert_message: series[str] | None = None
-        disable_alert: series[bool] | None = None
+        comment: Series[str] | None = None
+        alert_message: Series[str] | None = None
+        disable_alert: Series[bool] | None = None
 
 
 class na_type:
-    def __call__(self, x: series[T]) -> series[bool]:
-        return [x[0] is None]
+    def __call__(self, x: Series[T]) -> Series[bool]:
+        return [x[0] is None or np.isnan(x[0])]
 
     def __eq__(self, other):
-        if isinstance(other, series):
+        if isinstance(other, Series):
             other = other[0]
         return other is None or isinstance(other, na_type)
 
@@ -260,7 +281,7 @@ class ExampleScriptExecutor:
                     raise ValueError()
                 else:
                     args.append(self.visit(arg.value))
-
+            # print(node.func, args, kwargs)
             result = func(*args, **kwargs)
 
             if isinstance(result, strategy) and self.executor.declaration is None:
@@ -335,9 +356,11 @@ class ExampleScriptExecutor:
 
         def visit_Assign(self, node: ast.Assign):
             if node.target not in self.executor.nodes:
-                self.executor.nodes[node.target] = series([None])
+                self.executor.nodes[node.target] = Series([None])
 
             value = self.visit(node.value)
+            if value is None:
+                value = Series([None])
 
             if (
                 isinstance(value, input)
@@ -347,12 +370,35 @@ class ExampleScriptExecutor:
                 value.set(self.executor.inputs[node.target.id])
 
             self.executor.nodes[node.target].set(value[0])
+            # print('node.target:', node.target, "node value:", value[0])
 
             if isinstance(node.target, ast.Name):
                 self.executor.scopes[-1][node.target.id] = node.target
 
         def visit_Expr(self, node: ast.Expr):
             return self.visit(node.value)
+
+        def visit_BoolOp(self, node: ast.BoolOp):
+            if isinstance(node.op, ast.And):
+                return [all(self.visit(value)[0] for value in node.values)]
+            if isinstance(node.op, ast.Or):
+                return [any(self.visit(value)[0] for value in node.values)]
+            msg = f"unexpected node operator: {node.op}"
+            raise ValueError(msg)
+
+        def visit_BinOp(self, node: ast.BinOp):
+            if isinstance(node.op, ast.Add):
+                return [Operator.add(self.visit(node.left), self.visit(node.right))]
+            if isinstance(node.op, ast.Sub):
+                return [Operator.sub(self.visit(node.left), self.visit(node.right))]
+            if isinstance(node.op, ast.Mult):
+                return [Operator.mul(self.visit(node.left), self.visit(node.right))]
+            if isinstance(node.op, ast.Div):
+                return [Operator.truediv(self.visit(node.left), self.visit(node.right))]
+            if isinstance(node.op, ast.Mod):
+                return [Operator.mod(self.visit(node.left), self.visit(node.right))]
+            msg = f"unexpected node operator: {node.op}"
+            raise ValueError(msg)
 
         def visit_UnaryOp(self, node: ast.UnaryOp):
             if isinstance(node.op, ast.Not):
@@ -364,7 +410,9 @@ class ExampleScriptExecutor:
             raise ValueError()
 
         def visit_If(self, node: ast.If):
-            if self.visit(node.test)[0]:
+            logic_value = self.visit(node.test)
+            logic_value = Series([None]) if logic_value is None else logic_value
+            if logic_value[0]:
                 self.executor.scopes.append({})
                 for stmt in node.body:
                     self.visit(stmt)
@@ -374,6 +422,36 @@ class ExampleScriptExecutor:
                 for stmt in node.orelse:
                     self.visit(stmt)
                 self.executor.scopes.pop()
+
+        def visit_Compare(self, node: ast.Compare):  # noqa: C901, PLR0911, PLR0912
+            left = self.visit(node.left)
+            comparators = map(lambda x: self.visit(x), itertools.chain([node.left], node.comparators))
+            comparator_pairs = list(itertools.pairwise(comparators))
+            compare_ops = node.ops  # map(self.visit, node.ops)
+
+            for op, (left, right) in zip(compare_ops, comparator_pairs, strict=True):
+                if isinstance(op, ast.Eq):
+                    if not Operator.eq(left, right):
+                        return [False]
+                elif isinstance(op, ast.NotEq):
+                    if not Operator.ne(left, right):
+                        return [False]
+                elif isinstance(op, ast.Lt):
+                    if not Operator.lt(left, right):
+                        return [False]
+                elif isinstance(op, ast.LtE):
+                    if not Operator.le(left, right):
+                        return [False]
+                elif isinstance(op, ast.Gt):
+                    if not Operator.gt(left, right):
+                        return [False]
+                elif isinstance(op, ast.GtE):
+                    if not Operator.ge(left, right):
+                        return [False]
+                else:
+                    msg = f"unexpected node operator: {op}"
+                    raise ValueError(msg)
+            return [True]
 
         def visit_Script(self, node: ast.Script):
             self.executor.scopes.append({})
@@ -415,6 +493,39 @@ class ExampleScriptExecutor:
         print(f"final cash: {self.cash} ({'+' if net_profit_percent > 0 else ''}{net_profit_percent}%)")
 
 
+script_source2 = """
+//@version=5
+strategy("Custom BOLL Strategy", overlay=true)
+
+// 参数
+length = input( 10 ) //均线长度
+width = input( 1.0 ) //布林带上轨宽度
+width2 = input( 1.0 ) //布林带下轨宽度
+
+// 计算均线
+price = close
+
+// 计算买卖信号
+ma5 = ta.sma(close, 5)
+ma10 = ta.sma(close, 10)
+
+// 计算布林带
+middleLine = ta.sma(price, length) // 中线
+stdValue = ta.stdev(price, length)  // 标准差
+scaledStd = width * stdValue
+scaledStd2 = width2 * stdValue
+upperLine = middleLine + scaledStd // 上轨
+lowerLine = middleLine - scaledStd2 // 下轨
+
+if ((not na(ma5)) and (not na(ma10)) and (not na(upperLine)))
+    // 根据条件生成信号
+    if ((ma5 > ma10) and (price > upperLine))
+        strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+    else if (price < lowerLine)
+        strategy.entry("RsiLE", strategy.short, comment="RsiSE")
+"""
+
+
 script_source = """
 //@version=5
 strategy("RSI Strategy", overlay=true)
@@ -433,5 +544,5 @@ if (not na(vrsi))
 //plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
 """
 
-executor = ExampleScriptExecutor(script_source)
+executor = ExampleScriptExecutor(script_source2)
 executor.execute(hist)
