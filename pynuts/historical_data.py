@@ -2,29 +2,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
 import pandas as pd
 import yfinance as yf
 
 
-ticker = "TSLA"
-filename = "tsla.csv"
-
-
-def download_data():
+def download_data(ticker, filename):
     tsla = yf.Ticker(ticker)
     hist = tsla.history(period="max", interval="1d")
     hist.to_csv(filename)
 
 
-def read_data():
+def read_data(ticker, filename):
+    if not os.path.exists(filename):
+        download_data(ticker=ticker, filename=filename)
     hist = None
     if Path(filename).exists():
         hist = pd.read_csv(filename, index_col=0, parse_dates=True)
     return hist
 
 
-hist = read_data()
-
-
 if __name__ == "__main__":
-    download_data()
+    ticker = "TSLA"
+    filename = "../examples/tsla.csv"
+    download_data(ticker, filename)
